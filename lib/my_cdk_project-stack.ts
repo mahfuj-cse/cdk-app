@@ -1,102 +1,166 @@
-import * as cdk from "aws-cdk-lib";
-import * as constructs from "constructs";
-import * as apigateway from "aws-cdk-lib/aws-apigateway";
-import * as dynamodb from "aws-cdk-lib/aws-dynamodb";
-import * as lambda from "aws-cdk-lib/aws-lambda";
-import * as rds from "aws-cdk-lib/aws-rds";
-import * as ec2 from "aws-cdk-lib/aws-ec2";
-import * as kms from "aws-cdk-lib/aws-kms";
+import * as cdk from 'aws-cdk-lib';
+import { Construct } from 'constructs';
+import * as ec2 from 'aws-cdk-lib/aws-ec2';
+import * as iam from 'aws-cdk-lib/aws-iam';
+import * as rds from 'aws-cdk-lib/aws-rds';
+import * as secrets from 'aws-cdk-lib/aws-secretsmanager';
+import * as lambda from 'aws-cdk-lib/aws-lambda';
+import * as nodejs from 'aws-cdk-lib/aws-lambda-nodejs';
+import * as cr from 'aws-cdk-lib/custom-resources';
 
-export class MyCdkProjectStack extends cdk.Stack {
-  constructor(scope: constructs.Construct, id: string, props?: cdk.StackProps) {
+export class CdkTsRdsStack extends cdk.Stack {
+  constructor(scope: Construct, id: string, props?: cdk.StackProps) {
     super(scope, id, props);
 
-    const vpc = new ec2.Vpc(this, "MyVPC", {
-      maxAzs: 2, // Number of availability zones
+    // VPC for RDS and Lambda resolvers
+    const vpc = new ec2.Vpc(this, 'VPC', {
+      vpcName: 'rds-vpc',
+      maxAzs: 2,
+      natGateways: 0,
       subnetConfiguration: [
         {
-          cidrMask: 24, // Subnet size (adjust as needed)
-          name: "PublicSubnet",
-          subnetType: ec2.SubnetType.PUBLIC, // Public subnet
-        },
-        {
-          cidrMask: 24, // Subnet size (adjust as needed)
-          name: "PrivateSubnet",
-          subnetType: ec2.SubnetType.PRIVATE_WITH_NAT, // Private subnet with NAT
-        },
-      ],
-    });
+          subnetType: ec2.SubnetType.PRIVATE_ISOLATED,
+          cidrMask: 24,
+          name: 'rds'
+        }
+      ]
+    })
 
-    const myKey = new kms.Key(this, "MyKey");
-    const postgresEngine = rds.DatabaseInstanceEngine.postgres({
-      version: rds.PostgresEngineVersion.VER_15_2, // Adjust the version as needed
-    });
-
-    new rds.DatabaseInstance(this, "InstanceWithCustomizedSecret", {
-      engine: postgresEngine, // Use the PostgreSQL engine
+    // Security Groups
+    const securityGroupResolvers = new ec2.SecurityGroup(this, 'SecurityGroupResolvers', {
       vpc,
-      credentials: rds.Credentials.fromGeneratedSecret("postgres", {
-        secretName: "my-cool-name",
-        encryptionKey: myKey,
-        excludeCharacters: "!&*^#@()",
-        replicaRegions: [{ region: "eu-west-1" }, { region: "eu-west-2" }],
+      securityGroupName: 'resolvers-sg',
+      description: 'Security Group with Resolvers',
+    })
+    const securityGroupRds = new ec2.SecurityGroup(this, 'SecurityGroupRds', {
+      vpc,
+      securityGroupName: 'rds-sg',
+      description: 'Security Group with RDS',
+    })
+
+    // Ingress and Egress Rules
+    securityGroupRds.addIngressRule(
+      securityGroupResolvers,
+      ec2.Port.tcp(5432),
+      'Allow inbound traffic to RDS'
+    )
+    
+    // VPC Interfaces
+    vpc.addInterfaceEndpoint('LAMBDA', {
+      service: ec2.InterfaceVpcEndpointAwsService.LAMBDA,
+      subnets: { subnets: vpc.isolatedSubnets },
+      securityGroups: [securityGroupResolvers],
+    })
+    vpc.addInterfaceEndpoint('SECRETS_MANAGER', {
+      service: ec2.InterfaceVpcEndpointAwsService.SECRETS_MANAGER,
+      subnets: { subnets: vpc.isolatedSubnets },
+      securityGroups: [securityGroupResolvers],
+    })    
+
+    // IAM Role
+    const role = new iam.Role(this, 'Role', {
+      roleName: 'rds-role',
+      description: 'Role used in the RDS stack',
+      assumedBy: new iam.CompositePrincipal(
+        new iam.ServicePrincipal('ec2.amazonaws.com'),
+        new iam.ServicePrincipal('lambda.amazonaws.com'),
+      )
+    })
+    role.addToPolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: [
+          'cloudwatch:PutMetricData',
+          "ec2:CreateNetworkInterface",
+          "ec2:DescribeNetworkInterfaces",
+          "ec2:DeleteNetworkInterface",
+          "ec2:DescribeInstances",
+          "ec2:DescribeSubnets",
+          "ec2:DescribeSecurityGroups",
+          "ec2:DescribeRouteTables",
+          "logs:CreateLogGroup",
+          "logs:CreateLogStream",
+          "logs:PutLogEvents",
+          'lambda:InvokeFunction',
+          'secretsmanager:GetSecretValue',
+          'kms:decrypt',
+          'rds-db:connect'
+        ],
+        resources: ['*']
+      })
+    )
+
+    // RDS PostgreSQL Instance
+    const rdsInstance = new rds.DatabaseInstance(this, 'PostgresRds', {
+      vpc,
+      securityGroups: [securityGroupRds],
+      vpcSubnets: { subnets: vpc.isolatedSubnets },
+      availabilityZone: vpc.isolatedSubnets[0].availabilityZone,
+      instanceType: ec2.InstanceType.of(ec2.InstanceClass.T4G, ec2.InstanceSize.SMALL),
+      engine: rds.DatabaseInstanceEngine.postgres({version: rds.PostgresEngineVersion.VER_14_6}),
+      port: 5432,
+      instanceIdentifier: 'librarydb-instance',
+      allocatedStorage: 10,
+      maxAllocatedStorage: 10,
+      deleteAutomatedBackups: true,
+      backupRetention: cdk.Duration.millis(0),
+      credentials: rds.Credentials.fromUsername('libraryadmin'),
+      publiclyAccessible: false
+    })
+    rdsInstance.secret?.grantRead(role)
+
+    // Secrets for database credentials.
+    const credentials = secrets.Secret.fromSecretCompleteArn(this, 'CredentialsSecret', 'arn:aws:secretsmanager:us-east-1:253399877957:secret:rds-db-creds-W8vvei')
+    credentials.grantRead(role)
+
+    // Returns function to connect with RDS instance.
+    const createResolver = (name:string, entry:string) => new nodejs.NodejsFunction(this, name, {
+      functionName: name,
+      entry: entry,
+      bundling: {
+        externalModules: ['pg-native']
+      },
+      runtime: lambda.Runtime.NODEJS_18_X,
+      timeout: cdk.Duration.minutes(2),
+      role,
+      vpc,
+      vpcSubnets: { subnets: vpc.isolatedSubnets },
+      securityGroups: [ securityGroupResolvers ],
+      environment: {
+        RDS_ARN: rdsInstance.secret!.secretArn,
+        CREDENTIALS_ARN: credentials.secretArn,
+        HOST: rdsInstance.dbInstanceEndpointAddress
+      }
+    })
+
+    // Instantiate new db with user and permissions also add table.
+    const instantiate = createResolver('instantiate', 'src/instantiate.ts');
+    instantiate.node.addDependency(rdsInstance);
+
+    // Lambda function for adding a book in the RDS table.
+    const addBook = createResolver('add-book', 'src/addBook.ts');
+    addBook.node.addDependency(rdsInstance);
+
+    // Lambda function for gettings books in the RDS table.
+    const getBooks = createResolver('get-books', 'src/getBooks.ts');
+    getBooks.node.addDependency(rdsInstance);
+
+    // Custom Resource to execute instantiate function.
+    const customResource = new cr.AwsCustomResource(this, 'TriggerInstantiate', {
+      functionName: 'trigger-instantiate',
+      role,
+      onUpdate: {
+        service: 'Lambda',
+        action: 'invoke',
+        parameters: {
+          FunctionName: instantiate.functionName,
+        },
+        physicalResourceId: cr.PhysicalResourceId.of('TriggerInstantiate'),
+      },
+      policy: cr.AwsCustomResourcePolicy.fromSdkCalls({
+        resources: [instantiate.functionArn],
       }),
     });
-
-    // DynamoDB Table
-    const dynamoTable = new dynamodb.Table(this, "MyDynamoDBTable", {
-      partitionKey: { name: "itemId", type: dynamodb.AttributeType.STRING },
-      removalPolicy: cdk.RemovalPolicy.DESTROY, // Adjust as needed
-      billingMode: dynamodb.BillingMode.PROVISIONED, // Use Provisioned billing mode for Free Tier
-      readCapacity: 5, // Adjust based on your expected usage within Free Tier limits
-      writeCapacity: 5, // Adjust based on your expected usage within Free Tier limits
-    });
-
-    // Lambda Functions
-    const getAllItemsFunction = new lambda.Function(
-      this,
-      "getAllItemsFunction",
-      {
-        runtime: lambda.Runtime.NODEJS_16_X,
-        handler: "get-all.handler",
-        code: lambda.Code.fromAsset("src"), // Replace with the correct code directory
-        environment: {
-          TABLE_NAME: dynamoTable.tableName,
-          PRIMARY_KEY: "itemId",
-        },
-      }
-    );
-
-    const createItemFunction = new lambda.Function(this, "createItemFunction", {
-      runtime: lambda.Runtime.NODEJS_16_X,
-      handler: "create.handler",
-      code: lambda.Code.fromAsset("src"), // Replace with the correct code directory
-      environment: {
-        TABLE_NAME: dynamoTable.tableName,
-        PRIMARY_KEY: "itemId",
-      },
-    });
-
-    // Grant Permissions
-    dynamoTable.grantReadWriteData(createItemFunction);
-    dynamoTable.grantReadData(getAllItemsFunction);
-
-    // API Gateway
-    const api = new apigateway.RestApi(this, "MyApi", {
-      restApiName: "My API",
-    });
-
-    const rootResource = api.root;
-
-    // Integration with Lambda Functions
-    const getAllIntegration = new apigateway.LambdaIntegration(
-      getAllItemsFunction
-    );
-    rootResource.addMethod("GET", getAllIntegration);
-
-    const createIntegration = new apigateway.LambdaIntegration(
-      createItemFunction
-    );
-    rootResource.addResource("create").addMethod("POST", createIntegration);
+    customResource.node.addDependency(instantiate)
   }
 }
