@@ -25,6 +25,8 @@ export const handler: Handler = async () => {
 
     // Instantiate RDS Client with Admin
     console.log("instantiating client with admin...");
+    console.log("credentials credentials:", credentials);
+
     const client = new Client({
       host: admin.host,
       user: admin.username,
@@ -36,64 +38,42 @@ export const handler: Handler = async () => {
     // Connect to RDS instance with Admin
     console.log("connecting to rds with admin...");
     await client.connect();
-
-    // Check if the database already exists
-    const databaseExistsQuery = "SELECT 1 FROM pg_database WHERE datname = $1";
-    const databaseExistsResult = await client.query(databaseExistsQuery, [
-      "products",
-    ]);
-
-    if (databaseExistsResult.rows.length === 0) {
-      // Database doesn't exist, create it
-      console.log("setting up new database...");
-      await client.query("CREATE DATABASE products;");
-    } else {
-      console.log("database already exists, skipping creation...");
-    }
-
+    console.log("setting up new database...",credentials);
+    await client.query('CREATE DATABASE librarydb');
+    await client.query(
+      `CREATE USER ${credentials.user} WITH PASSWORD '${credentials.password}';`
+    );
+    await client.query(
+      `GRANT ALL PRIVILEGES ON DATABASE librarydb TO ${credentials.user}`
+    );
+    console.log("setup completed!");
     await client.end();
 
     // Instantiate RDS Client with new user
     console.log("instantiating client with new user...");
     const userClient = new Client({
       host: admin.host,
-      user: credentials.username,
+      user: credentials.user,
       password: credentials.password,
-      database: "products",
+      database: "librarydb",
       port: 5432,
     });
 
     // Connect to RDS instance
     console.log("connecting to rds with new user...");
-    console.log("Admin credentials:", admin);
-    console.log("Library credentials:", credentials);
-
     await userClient.connect();
-
-    // Check if the table already exists
-    const tableExistsQuery = "SELECT to_regclass($1) IS NOT NULL";
-    const tableExistsResult = await userClient.query(tableExistsQuery, [
-      "library",
-    ]);
-
-    if (!tableExistsResult.rows[0].is_not_null) {
-      // Table doesn't exist, create it
-      console.log("creating new table...");
-      const createTableCommand = [
-        "CREATE TABLE library (",
-        "isbn VARCHAR(50) UNIQUE NOT NULL, ",
-        "name VARCHAR(50) NOT NULL, ",
-        "authors VARCHAR(50)[] NOT NULL, ",
-        "languages VARCHAR(50)[] NOT NULL, ",
-        "countries VARCHAR(50)[] NOT NULL, ",
-        "numberOfPages integer, ",
-        "releaseDate VARCHAR(50) NOT NULL);",
-      ];
-      await userClient.query(createTableCommand.join(""));
-    } else {
-      console.log("table already exists, skipping creation...");
-    }
-
+    console.log("creating new table...");
+    const createTableCommand = [
+      "CREATE TABLE library (",
+      "isbn VARCHAR(50) UNIQUE NOT NULL, ",
+      "name VARCHAR(50) NOT NULL, ",
+      "authors VARCHAR(50)[] NOT NULL, ",
+      "languages VARCHAR(50)[] NOT NULL, ",
+      "countries VARCHAR(50)[] NOT NULL, ",
+      "numberOfPages integer, ",
+      "releaseDate VARCHAR(50) NOT NULL);",
+    ];
+    await userClient.query(createTableCommand.join(""));
     console.log("tasks completed!");
     await userClient.end();
   } catch (error) {
