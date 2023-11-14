@@ -3,7 +3,6 @@ import { SecretsManager } from 'aws-sdk';
 import { Client } from 'pg';
 
 const RDS_ARN = process.env.RDS_ARN!;
-const CREDENTIALS_ARN = process.env.CREDENTIALS_ARN!;
 
 const secrets = new SecretsManager();
 
@@ -14,44 +13,39 @@ export const handler: Handler = async () => {
       const adminSecret = await secrets.getSecretValue({ SecretId: RDS_ARN }).promise();
       const admin = JSON.parse(adminSecret.SecretString as string);
   
-      // Retrieve RDS User credentials
-      console.log('retrieving library credentials...');
-      const credentialsSecret = await secrets.getSecretValue({ SecretId: CREDENTIALS_ARN }).promise();
-      const credentials = JSON.parse(credentialsSecret.SecretString as string);
-  
       // Instantiate RDS Client with Admin
-      console.log('instantiating client with admin...');
+      console.log('instantiating client with admin...', admin);
       const client = new Client({
         host: admin.host,
         user: admin.username,
         password: admin.password,
-        database: 'postgres',
+        database: 'libraryDatabase',
         port: 5432,
       });
   
       // Connect to RDS instance with Admin
-      console.log('connecting to rds with admin...');
+      console.log('connecting to rds with admin credentials...');
       await client.connect();
-      console.log('setting up new database...');
-      await client.query('CREATE DATABASE librarydb;');
-      await client.query(`CREATE USER ${credentials.user} WITH PASSWORD '${credentials.password}';`);
-      await client.query(`GRANT ALL PRIVILEGES ON DATABASE librarydb TO ${credentials.user};`);
-      console.log('setup completed!');
-      await client.end();
   
-      // Instantiate RDS Client with new user
-      console.log('instantiating client with new user...');
-      const userClient = new Client({
+      // Setting up new database
+      console.log('setting up new database...');
+      // await client.query('CREATE DATABASE productdb;');
+  
+      // Instantiate RDS Client with admin for further operations
+      console.log('instantiating client for further operations...');
+      const adminClient = new Client({
         host: admin.host,
-        user: credentials.user,
-        password: credentials.password,
-        database: 'librarydb',
+        user: admin.username,
+        password: admin.password,
+        database: 'libraryDatabase', // Use the newly created database
         port: 5432,
       });
 
-      // Connect to RDS instance
-      console.log('connecting to rds with new user...');
-      await userClient.connect();
+      // Connect to RDS instance with Admin for further operations
+      console.log('connecting to rds for further operations...');
+      await adminClient.connect();
+  
+      // Creating new table
       console.log('creating new table...');
       const createTableCommand = [
         'CREATE TABLE library (',
@@ -62,13 +56,16 @@ export const handler: Handler = async () => {
         'countries VARCHAR(50)[] NOT NULL, ',
         'numberOfPages integer, ',
         'releaseDate VARCHAR(50) NOT NULL);',
-      ]
-      await userClient.query(createTableCommand.join(''))
+      ];
+      await adminClient.query(createTableCommand.join(''));
       console.log('tasks completed!');
-      await userClient.end();
+  
+      // Close connections
+      await adminClient.end();
+      await client.end();
 
     } catch (error) {
       console.error('Error creating database:', error);
       throw error;
     }
-  };
+};

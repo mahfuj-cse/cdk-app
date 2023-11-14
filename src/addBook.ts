@@ -2,7 +2,7 @@ import { Handler } from 'aws-lambda';
 import { SecretsManager } from 'aws-sdk';
 import { Client } from 'pg';
 
-const CREDENTIALS_ARN = process.env.CREDENTIALS_ARN!;
+const RDS_ARN = process.env.RDS_ARN!;
 const HOST = process.env.HOST!;
 
 const secrets = new SecretsManager();
@@ -21,16 +21,16 @@ export const handler: Handler = async (event:IAddEvent) => {
     try {
       // Retrieve RDS User credentials
       console.log('retrieving library credentials...');
-      const credentialsSecret = await secrets.getSecretValue({ SecretId: CREDENTIALS_ARN }).promise();
-      const credentials = JSON.parse(credentialsSecret.SecretString as string);
+      const adminSecret = await secrets.getSecretValue({ SecretId: RDS_ARN }).promise();
+      const admin = JSON.parse(adminSecret.SecretString as string);
   
       // Instantiate RDS Client
       console.log('instantiating rds client...');
       const client = new Client({
-        host: HOST,
-        user: credentials.user,
-        password: credentials.password,
-        database: 'librarydb',
+        host: admin.host,
+        user: admin.username,
+        password: admin.password,
+        database: 'libraryDatabase',
         port: 5432,
       });
   
